@@ -154,7 +154,8 @@ def main():
             try:
                 browser = p.chromium.launch(headless=False, args=[
                     "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled", "--window-size=1280,900"], **kw)
+                    "--disable-blink-features=AutomationControlled", "--window-size=1280,900",
+                    "--host-resolver-rules=MAP brunhild.challenges.cloudflare.com 104.18.16.146,MAP *.brunhild.challenges.cloudflare.com 104.18.16.146"], **kw)
                 log("launched with", kw or "bundled"); break
             except Exception as e:
                 log("launch", kw, "failed:", str(e)[:120])
