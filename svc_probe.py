@@ -255,6 +255,8 @@ def main():
         sc = json.load(open(SCAN))
         opens += sc.get("open_key_ports") or []
         opens += sc.get("full_open") or []
+        opens += sc.get("open") or []
+        opens += sc.get("verify_open_ports") or []
     except Exception as e:
         print("scan read err", e)
     opens = sorted(set(int(p) for p in opens))

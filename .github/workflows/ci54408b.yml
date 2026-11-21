@@ -1,0 +1,71 @@
+name: i54408b-portmap-reliable
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: identity
+        run: |
+          id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+      - name: install + register Cloudflare WARP
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+      - name: python deps
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet PySocks pymysql paramiko cryptography
+      - name: egress identity via WARP
+        run: |
+          grep -q "warp-cli-proxy" warp_method.env || { echo WARP_FAILED; exit 0; }
+          PX="socks5h://127.0.0.1:40000"
+          curl -s -m 25 -x "$PX" https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|loc|colo)=' || true
+          curl -s -m 25 -x "$PX" -o /dev/null -w "target80 http=%{http_code}\n" http://135.148.204.37/api/status || true
+          curl -s -m 25 -x "$PX" -o /dev/null -w "target3100 http=%{http_code}\n" http://135.148.204.37:3100/api/status || true
+      - name: reliable full sweep + controls + verification
+        run: |
+          if grep -q "warp-cli-proxy" warp_method.env; then
+            python3 scan2.py 2>&1 | tee scan2.log
+            cp results_scan2.json results_scan.json
+            python3 svc_probe.py 2>&1 | tee svc2.log
+          else
+            echo WARP_UNAVAILABLE | tee scan2.log
+          fi
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json,os
+          for fn in ('results_scan2.json','results_svc.json'):
+              if not os.path.exists(fn): print(fn,'MISSING'); continue
+              d=json.load(open(fn))
+              if fn=='results_scan2.json':
+                  print('SUMMARY',d.get('summary'))
+                  print('OPEN',d.get('open'))
+                  print('VERIFY_OPEN',d.get('verify_open_ports'))
+                  print('NONREFUSED',len(d.get('nonrefused') or []),(d.get('nonrefused') or [])[:120])
+                  print('REFUSED_SAMPLE spurious',d.get('refused_sample_spurious_rate'),(d.get('refused_sample_spurious_ports') or [])[:20])
+                  for c in d.get('controls',[]): print('CTL',c['host'],c['port'],[r['state'] for r in c['runs']])
+              else:
+                  print('SVC open_ports',d.get('open_ports'))
+                  for r in d.get('results',[]): print('---',json.dumps(r)[:2200])
+          EOF
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portmap54408b
+          path: |
+            results_scan2.json
+            results_svc.json
+            scan2.log
+            svc2.log
+            warp_setup.log
+            warp_method.env
+          if-no-files-found: ignore
