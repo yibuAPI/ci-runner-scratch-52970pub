@@ -1,0 +1,87 @@
+name: i54113warpv2
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i54113warpx2"
+permissions:
+  contents: read
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: runner identity
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+
+      - name: install + register Cloudflare WARP (proxy mode, IPv4+IPv6)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install browser deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet playwright "httpx[socks]"
+          python3 -m playwright install --with-deps chromium 2>&1 | tail -2
+          (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
+
+      - name: instrumented WARP probe (connectivity timeline + turnstile diagnostics)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          set -o pipefail
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          PROXY="$SRC" BUDGET=210 NT="$NT" xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_probe2.py 2>&1 | tee probe2.log | tail -120 || true
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json
+          try:
+              d=json.load(open('results_probe2.json'))
+          except Exception as e:
+              print('no results', e); raise SystemExit
+          print('== conn timeline ==')
+          for r in d.get('conn_timeline',[]): print(json.dumps(r)[:300])
+          s=d.get('solve',{})
+          print('== solve ==','token_len',s.get('token_len'),'clicked',s.get('clicked'),'err',s.get('err'),'niframes',s.get('niframes'))
+          print('page_log', s.get('page_log'))
+          print('cf_responses:')
+          for x in (s.get('cf_responses') or [])[-25:]: print('  ',x)
+          print('console tail:')
+          for x in (s.get('console') or [])[-25:]: print('  ',json.dumps(x)[:250])
+          print('snapshots(last 3) frames text:')
+          for sn in (s.get('snapshots') or [])[-3:]:
+              print('  t=',sn.get('t'))
+              for fr in (sn.get('frames') or []): print('     ',fr.get('url','')[:110],'|',(fr.get('text') or '')[:200].replace('\n',' '))
+              st=sn.get('state') or {}
+              print('     iframes=',st.get('iframes'),' inputs=',st.get('inputs'))
+          for a in d.get('attempts',[]): print('LOGIN',a['u'],a['status'],a['body'][:160])
+          if d.get('login'): print('LOGIN_SUCCESS',d['login']['username'],'pass=',d['login']['password'])
+          EOF
+          echo "--- warp method ---"; cat warp_method.env 2>/dev/null
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag54113v2
+          path: |
+            results_probe2.json
+            probe2.log
+            warp_setup.log
+            warp_method.env
+            last_probe2.html
+            last_probe2.png
+          if-no-files-found: ignore
