@@ -31,6 +31,12 @@ jobs:
           python3 -m pip install --quiet --upgrade pip
           python3 -m pip install --quiet playwright
           python3 -m playwright install --with-deps chromium 2>&1 | tail -3
+      - name: patch dns (brunhild is IPv6-only upstream; runners are IPv4-only)
+        run: |
+          echo "104.18.16.146 brunhild.challenges.cloudflare.com" | sudo tee -a /etc/hosts
+          echo "104.18.17.146 brunhild.challenges.cloudflare.com" | sudo tee -a /etc/hosts
+          echo "=== verify brunhild reachable over v4 ==="
+          curl -s -m 10 -o /dev/null -w "brunhild_http=%{http_code}\n" https://brunhild.challenges.cloudflare.com/cdn-cgi/challenge-platform/ || true
       - name: run solver
         env:
           TARGET: "http://135.148.204.37"
