@@ -1,0 +1,119 @@
+name: i54408-portmap-warp
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "full 1-65535 sweep (1/0)"
+        required: false
+        default: "1"
+permissions:
+  contents: read
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: runner identity
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+          echo "--- target DNS ---"
+          getent ahosts 135.148.204.37 || true
+          (dig +short AAAA 135.148.204.37 2>/dev/null || nslookup -type=AAAA 135.148.204.37 2>/dev/null || true) | head -5
+
+      - name: install + register Cloudflare WARP (proxy mode)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: python deps
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet "PySocks" pymysql paramiko cryptography
+
+      - name: baselines through WARP (target web face + egress identity)
+        run: |
+          PX=""
+          grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && PX="socks5h://127.0.0.1:40000"
+          echo "PX=$PX"
+          if [ -n "$PX" ]; then
+            echo "--- egress trace ---"
+            curl -s -m 25 -x "$PX" https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp|loc|colo)=' || true
+            echo "--- target .37:80 /api/status ---"
+            curl -s -m 25 -x "$PX" -o /dev/null -w "http=%{http_code} size=%{size_download}\n" http://135.148.204.37/api/status || true
+            echo "--- target .37:3100 ---"
+            curl -s -m 25 -x "$PX" -o /dev/null -w "http=%{http_code} size=%{size_download}\n" http://135.148.204.37:3100/api/status || true
+            echo "--- raw TCP sanity via socks (port 443 to 1.1.1.1) ---"
+            python3 -c "import socks,socket;s=socks.socksocket();s.set_proxy(socks.SOCKS5,'127.0.0.1',40000);s.settimeout(10);s.connect(('1.1.1.1',443));print('RAW_TCP_PROXY_OK')" || echo RAW_TCP_PROXY_FAIL
+          fi
+
+      - name: port sweep (WARP egress, then direct comparison)
+        env:
+          FULL: ${{ github.event.inputs.full }}
+        run: |
+          if grep -q "warp-cli-proxy" warp_method.env 2>/dev/null; then
+            echo "=== using WARP proxy ==="
+            USE_PROXY=1 FULL="$FULL" TH=256 TO=4 python3 scan_ports.py 2>&1 | tee scan.log
+            cp results_scan.json results_scan_warp.json
+          else
+            echo "=== WARP UNAVAILABLE: direct datacenter comparison pass only ==="
+            echo "WARP_SETUP_FAILED" >> warp_setup.log
+          fi
+          echo "=== direct (non-proxy) key-port pass, same runner ==="
+          USE_PROXY=0 FULL=0 OUT=results_direct.json python3 scan_ports.py 2>&1 | tee scan_direct.log | tail -40
+
+      - name: service interrogation
+        run: |
+          cp results_scan_warp.json results_scan.json 2>/dev/null || true
+          ls -la results_scan.json || true
+          if grep -q "warp-cli-proxy" warp_method.env 2>/dev/null; then
+            python3 svc_probe.py 2>&1 | tee svc.log
+          else
+            echo "no warp -> skip proxy-based service probe" | tee svc.log
+          fi
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json,os
+          def show(fn):
+              if not os.path.exists(fn):
+                  print(fn,'MISSING'); return
+              d=json.load(open(fn))
+              print('=====',fn,'use_proxy=',d.get('use_proxy'),'sanity=',d.get('sanity'))
+              print(' closed_sample:',d.get('closed_sample_summary') or d.get('closed_sample') and {})
+              print(' key_summary_proxy:',d.get('key_ports_summary_proxy'))
+              print(' key_summary_direct:',d.get('key_ports_summary_direct'))
+              print(' OPEN_KEY:',d.get('open_key_ports'))
+              print(' NON_TIMEOUT_KEY:',[(r['port'],r['state'],r.get('ms')) for r in (d.get('key_ports_proxy') or []) if r['state']!='timeout'])
+              if d.get('full_proxy_summary'):
+                  print(' FULL_SUMMARY:',d.get('full_proxy_summary'))
+                  print(' FULL_OPEN:',d.get('full_open'))
+                  print(' FULL_NON_TIMEOUT_NONOPEN:',d.get('full_non_timeout_nonopen')[:150])
+          show('results_scan_warp.json'); show('results_direct.json')
+          if os.path.exists('results_svc.json'):
+              d=json.load(open('results_svc.json'))
+              print('===== SVC open_ports', d.get('open_ports'))
+              for r in d.get('results',[]):
+                  print('---', json.dumps(r)[:2500])
+          EOF
+          echo "--- warp method ---"; cat warp_method.env 2>/dev/null
+
+      - name: upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portmap54408
+          path: |
+            results_scan_warp.json
+            results_direct.json
+            results_svc.json
+            scan.log
+            scan_direct.log
+            svc.log
+            warp_setup.log
+            warp_method.env
+          if-no-files-found: ignore
