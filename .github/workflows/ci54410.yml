@@ -1,0 +1,72 @@
+name: i54410cookie
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i54410ck"
+permissions:
+  contents: read
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: runner identity
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+
+      - name: install + register Cloudflare WARP (proxy mode, IPv4+IPv6)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install browser deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet playwright "httpx[socks]"
+          python3 -m playwright install --with-deps chromium 2>&1 | tail -2
+          (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
+
+      - name: solve turnstile and fetch session cookie
+        env:
+          NT: ${{ github.event.inputs.nt }}
+        run: |
+          set -o pipefail
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          PROXY="$SRC" BUDGET=210 NT="$NT" xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_cookie.py 2>&1 | tee cookie.log | tail -150 || true
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json
+          try: d=json.load(open('results_cookie.json'))
+          except Exception as e: print('no results', e); raise SystemExit
+          for r in d.get('conn_timeline',[]): print(json.dumps(r)[:200])
+          s=d.get('solve',{})
+          print('SOLVE token_len',s.get('token_len'),'clicked',s.get('clicked'),'err',s.get('err'))
+          print('LOGIN_PROBE',json.dumps(d.get('login_probe'))[:400])
+          print('SET_COOKIE',json.dumps(d.get('set_cookie'))[:800])
+          print('COOKIE_HEADER',d.get('cookie_header'))
+          print('BYPASS',json.dumps(d.get('session_bypass_check'))[:1200])
+          EOF
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag54410cookie
+          path: |
+            results_cookie.json
+            cookie.log
+            warp_setup.log
+            warp_method.env
+          if-no-files-found: ignore
