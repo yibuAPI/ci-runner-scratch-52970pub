@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
           python3 -m pip install --quiet --upgrade pip
-          python3 -m pip install --quiet playwright
+          python3 -m pip install --quiet playwright "httpx[socks]"
           python3 -m playwright install --with-deps chromium 2>&1 | tail -2
           (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
 
@@ -45,9 +45,9 @@ jobs:
           echo "PROXY_SOURCE=$SRC"
           if [ -z "$SRC" ]; then
             echo "warp proxy mode unavailable -> trying tunnel/direct mode"
-            MODE=mini PROXY="" BUDGET=150 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+            MODE=mini PROXY="" BUDGET=110 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
           else
-            MODE=mini PROXY="$SRC" BUDGET=150 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+            MODE=mini PROXY="$SRC" BUDGET=110 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
           fi
           python3 - <<'EOF' || true
           import json,glob
@@ -63,7 +63,7 @@ jobs:
           T=$(python3 -c "import json;print(json.load(open('results_mini.json'))['solve']['token_len'])" 2>/dev/null || echo 0)
           if [ "$T" != "0" ]; then echo "mini already obtained token_len=$T"; exit 0; fi
           SRC=$(grep -q warp-cli-proxy warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
-          MODE=full PROXY="$SRC" BUDGET=120 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+          MODE=full PROXY="$SRC" BUDGET=100 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
           python3 - <<'EOF' || true
           import json
           d=json.load(open('results_full.json')); s=d['solve']
@@ -82,7 +82,7 @@ jobs:
             BP=$!; sleep 2
             curl -s -m 40 -x http://127.0.0.1:8899 -o /dev/null -w "bridge->target http=%{http_code} t=%{time_total}\n" http://135.148.204.37/api/status || true
             curl -s -m 40 -x http://127.0.0.1:8899 -o /dev/null -w "bridge->cf api.js http=%{http_code} size=%{size_download}\n" "https://challenges.cloudflare.com/turnstile/v0/api.js" || true
-            MODE=mini PROXY="http://127.0.0.1:8899" BUDGET=170 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
+            MODE=mini PROXY="http://127.0.0.1:8899" BUDGET=120 xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_solver.py 2>&1 | tail -60 || true
             kill $BP 2>/dev/null || true
             tail -20 bridge_warp.log || true
           else
