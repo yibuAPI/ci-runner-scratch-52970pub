@@ -1,0 +1,39 @@
+name: i54770-warp-infra-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: install python deps
+        run: |
+          sudo apt-get update -qq >/dev/null 2>&1 || true
+          sudo apt-get install -y -qq default-jre-headless curl unzip >/dev/null 2>&1 || true
+          python3 -m pip install -q --upgrade pip >/dev/null 2>&1 || true
+          python3 -m pip install -q requests pysocks
+          java -version 2>&1 | head -3 || true
+      - name: setup WARP
+        run: |
+          chmod +x setup_warp.sh
+          bash setup_warp.sh || echo WARP_SETUP_SCRIPT_FAILED
+          cat warp_method.env 2>/dev/null || echo NO_METHOD_FILE
+      - name: probe targets
+        run: |
+          set -o pipefail
+          python3 -u probe54770.py 2>&1 | tee probe.log || echo PROBE_EXIT_NONZERO
+          echo "===== tail probe.log ====="
+          tail -c 20000 probe.log
+      - name: upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i54770-results
+          path: |
+            probe.log
+            results54770.json
+            results54770.partial.json
+            warp_method.env
+            jenkins-cli.jar
+          if-no-files-found: warn
