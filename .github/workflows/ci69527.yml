@@ -1,0 +1,36 @@
+name: i69527-probe3000
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "note"
+        required: false
+        default: "i69527"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: direct (Azure runner) vantage
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          LABEL=azure-direct PROXY="" python3 probe3000.py 2>&1 || true
+
+      - name: install + register Cloudflare WARP (proxy mode)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: warp vantage
+        run: |
+          cat warp_method.env 2>/dev/null || true
+          if grep -q "warp-cli-proxy" warp_method.env 2>/dev/null; then
+            LABEL=warp-socks5 PROXY="socks5h://127.0.0.1:40000" python3 probe3000.py 2>&1 || true
+          else
+            echo "WARP proxy mode unavailable; wgcf-tunnel mode -> running direct through tunnel"
+            LABEL=warp-tunnel PROXY="" python3 probe3000.py 2>&1 || true
+          fi
