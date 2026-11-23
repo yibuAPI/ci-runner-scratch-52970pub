@@ -1,0 +1,35 @@
+name: ci71303
+on:
+  workflow_dispatch: {}
+concurrency:
+  group: ci71303
+  cancel-in-progress: true
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: egress + deps
+        run: |
+          echo "IPv4 egress: $(curl -s -4 --max-time 10 https://api.ipify.org)"
+          python3 -m pip install -q --disable-pip-version-check requests pysocks
+      - name: setup WARP
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log || echo "WARP_SETUP_FAILED_CONTINUE"
+          cat warp_method.env 2>/dev/null || true
+          (echo >/dev/tcp/127.0.0.1/40000) 2>/dev/null && echo "40000 LISTEN" || echo "40000 not listening"
+      - name: probe 147.135.76.13
+        env:
+          NTFY: "i71303x9k2"
+        run: python3 probe71303.py 2>&1 | tee probe.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results71303
+          path: |
+            results71303/
+            probe.log
+            warp_setup.log
+            warp_method.env
+          if-no-files-found: warn
