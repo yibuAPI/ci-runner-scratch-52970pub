@@ -1,0 +1,33 @@
+name: ci71114
+on:
+  workflow_dispatch: {}
+concurrency:
+  group: ci71114
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: egress + deps
+        run: |
+          echo "IPv4 egress: $(curl -s -4 --max-time 10 https://api.ipify.org)"
+          python3 -m pip install -q --disable-pip-version-check requests pysocks
+      - name: setup WARP
+        run: |
+          bash setup_warp71114.sh 2>&1 | tee warp_setup.log || echo "WARP_SETUP_FAILED_CONTINUE"
+          echo "---- socks listen check ----"
+          (echo >/dev/tcp/127.0.0.1/40000) 2>/dev/null && echo "40000 LISTEN" || echo "40000 not listening"
+      - name: probe
+        env:
+          NTFY_TOPIC: "yv71114ck8f2d"
+        run: python3 probe71114.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results71114
+          path: |
+            results71114/
+            warp_setup.log
+          if-no-files-found: warn
