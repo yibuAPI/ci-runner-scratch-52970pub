@@ -1,0 +1,20 @@
+name: i70914-target-native-egress
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "note"
+        required: false
+        default: "i70914"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: native-egress-rawdial
+        run: |
+          echo "runner: $(id -u) $(uname -r)"
+          python3 probe70914.py 2>&1 || true
