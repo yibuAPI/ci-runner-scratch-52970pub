@@ -1,0 +1,105 @@
+name: i75513warp
+on:
+  workflow_dispatch:
+    inputs:
+      nt:
+        description: "ntfy topic"
+        required: false
+        default: "i75513warpx"
+permissions:
+  contents: read
+jobs:
+  warp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: runner identity
+        run: |
+          echo "=== runner ==="; id -u; uname -r
+          (curl -s --max-time 10 https://api.ipify.org || echo noip) | sed 's/^/PRE_EGRESS_IP=/'
+
+      - name: install + register Cloudflare WARP (proxy mode)
+        run: |
+          bash setup_warp.sh 2>&1 | tee warp_setup.log
+          cat warp_method.env 2>/dev/null || true
+
+      - name: install browser deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb >/dev/null 2>&1 || true
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet playwright "httpx[socks]"
+          python3 -m playwright install --with-deps chromium 2>&1 | tail -2
+          (google-chrome --version || chromium --version || echo no-system-chrome) 2>&1 | head -2
+
+      - name: pre-solve egress check (bare IP origin .37)
+        run: |
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          echo "--- direct .37 ---"
+          curl -s -m 20 -o /tmp/st37_direct.json -w "direct37 http=%{http_code} size=%{size_download}\n" http://135.148.204.37/api/status || echo direct37_FAILED
+          head -c 400 /tmp/st37_direct.json 2>/dev/null; echo
+          echo "--- via warp .37 ---"
+          if [ -n "$SRC" ]; then
+            curl -s -m 30 -x "$SRC" -o /tmp/st37_warp.json -w "warp37 http=%{http_code} size=%{size_download}\n" http://135.148.204.37/api/status || echo warp37_FAILED
+            head -c 400 /tmp/st37_warp.json 2>/dev/null; echo
+            curl -s -m 20 -x "$SRC" https://api.ipify.org | sed 's/^/WARP_EGRESS_IP=/'
+          fi
+
+      - name: solve + turnstile-bypass cookie (.37 bare IP origin; control 6.9:4100)
+        env:
+          NT: ${{ github.event.inputs.nt }}
+          TARGETS: "http://135.148.204.37,http://40.160.6.9:4100"
+          SITEKEY: "0x4AAAAAAGDEObVt9sc3zTw_"
+        run: |
+          set -o pipefail
+          SRC=$(grep -q "warp-cli-proxy" warp_method.env 2>/dev/null && echo socks5://127.0.0.1:40000 || echo "")
+          echo "PROXY_SOURCE=$SRC"
+          PROXY="$SRC" BUDGET=240 NT="$NT" TARGETS="$TARGETS" SITEKEY="$SITEKEY" \
+            xvfb-run -a --server-args="-screen 0 1280x900x24" python3 warp_probe37.py 2>&1 | tee probe37.log | tail -220 || true
+
+      - name: summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json
+          try:
+              d=json.load(open('results_probe37.json'))
+          except Exception as e:
+              print('no results', e); raise SystemExit
+          print('v', d.get('v'), 'targets', d.get('targets'), 'proxy', d.get('proxy'))
+          for a in d.get('attempts', []):
+              print('=== attempt', a.get('target'), 'sitekey_used', a.get('sitekey_used'))
+              print(' status', json.dumps(a.get('status'))[:600])
+              for r in a.get('conn_timeline',[]): print(' conn', json.dumps(r)[:300])
+              s=a.get('solve') or {}
+              print(' solve token_len', s.get('token_len'), 'origin', s.get('origin'),
+                    'clicked', len(s.get('clicks') or []), 'err', s.get('err'))
+              print(' page_log', s.get('page_log'))
+              by=a.get('bypass') or {}
+              print(' STEP1', json.dumps(by.get('step1'))[:500])
+              print(' STEP1_COOKIES', json.dumps(by.get('cookies_after_step1'))[:400])
+              print(' STEP2', json.dumps(by.get('step2'))[:500])
+              print(' STEP2_COOKIES', json.dumps(by.get('cookies_after_step2'))[:400])
+              print(' BYPASS', by.get('bypass_success'))
+          EOF
+          echo "--- warp method ---"; cat warp_method.env 2>/dev/null
+          echo "--- cookie files ---"; ls -la cookies_*.json 2>/dev/null || true
+
+      - name: upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag75513
+          path: |
+            results_probe37.json
+            cookies_*.json
+            probe37.log
+            warp_setup.log
+            warp_method.env
+            last_probe_*.html
+            last_probe_*.png
+            shot_*.png
+          if-no-files-found: ignore
